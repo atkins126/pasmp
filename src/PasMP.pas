@@ -1,12 +1,12 @@
 (******************************************************************************
  *                                   PasMP                                    *
  ******************************************************************************
- *                        Version 2020-09-12-20-18-0000                       *
+ *                        Version 2021-05-25-21-26-0000                       *
  ******************************************************************************
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (C) 2016-2020, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (C) 2016-2021, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -929,7 +929,9 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
 {$ifend}
      TPasMPCriticalSection=class(TCriticalSection)
       protected
+{$if not defined(Darwin)}
        fCacheLineFillUp:array[0..(PasMPCPUCacheLineSize-SizeOf(TPasMPCriticalSectionInstance))-1] of TPasMPUInt8;
+{$ifend}
      end;
 {$if defined(fpc) and (fpc_version>=3)}{$pop}{$ifend}
 
@@ -944,7 +946,9 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
       private
        fMutex:pthread_mutex_t;
       protected
+{$if not defined(Darwin)}
        fCacheLineFillUp:array[0..(PasMPCPUCacheLineSize-SizeOf(pthread_mutex_t))-1] of TPasMPUInt8;
+{$ifend}
 {$else}
       private
        fCriticalSection:TPasMPCriticalSection;
@@ -983,7 +987,9 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
       private
        fMutex:pthread_mutex_t;
       protected
+{$if not defined(Darwin)}
        fCacheLineFillUp:array[0..(PasMPCPUCacheLineSize-SizeOf(pthread_mutex_t))-1] of TPasMPUInt8;
+{$ifend}
 {$else}
       private
        fCriticalSection:TPasMPCriticalSection;
@@ -1013,8 +1019,11 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
 {$elseif defined(Unix)}
       private
        fConditionVariable:pthread_cond_t;
+       fConditionVariableAttributes:pthread_condattr_t;
+       fHasConditionVariableAttributes:TPasMPBool32;
+       fClockID:TPasMPInt32;
       protected
-       fCacheLineFillUp:array[0..(PasMPCPUCacheLineSize-SizeOf(pthread_cond_t))-1] of TPasMPUInt8;
+       fCacheLineFillUp:array[0..((PasMPCPUCacheLineSize*2)-(SizeOf(pthread_cond_t)+SizeOf(pthread_condattr_t)+SizeOf(TPasMPBool32)+SizeOf(TPasMPInt32)))-1] of TPasMPUInt8;
 {$else}
       private
        {$ifdef HAS_VOLATILE}[volatile]{$endif}fWaitCounter:TPasMPInt32;
@@ -1111,7 +1120,7 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
       private
        fReadWriteLock:pthread_rwlock_t;
       protected
-{$if not (defined(Android) and defined(CPUAArch64))}
+{$if not ((defined(Android) and defined(CPUAArch64)) or defined(Darwin))}
        fCacheLineFillUp:array[0..(PasMPCPUCacheLineSize-SizeOf(pthread_rwlock_t))-1] of TPasMPUInt8;
 {$ifend}
 {$else}
@@ -1184,7 +1193,7 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
       private
        fReadWriteLock:pthread_rwlock_t;
       protected
-{$if not (defined(Android) and defined(CPUAArch64))}
+{$if not ((defined(Android) and defined(CPUAArch64)) or defined(Darwin))}
        fCacheLineFillUp:array[0..(PasMPCPUCacheLineSize-SizeOf(pthread_rwlock_t))-1] of TPasMPUInt8;
 {$ifend}
 {$else}
@@ -1556,10 +1565,12 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
        fCacheLineFillUp1:array[0..(PasMPCPUCacheLineSize-SizeOf(TPasMPInt32))-1] of TPasMPUInt8; // for to force fWriteIndex and fData to different CPU cache lines
        fData:array of TPasMPUInt8;
        fSize:TPasMPInt32;
-       fCacheLineFillUp2:array[0..(PasMPCPUCacheLineSize-(SizeOf(pointer)+SizeOf(TPasMPInt32)))-1] of TPasMPUInt8; // as CPU cache line alignment
+       fLockState:TPasMPInt32;
+       fCacheLineFillUp2:array[0..(PasMPCPUCacheLineSize-(SizeOf(pointer)+SizeOf(TPasMPInt32)+SizeOf(TPasMPInt32)))-1] of TPasMPUInt8; // as CPU cache line alignment
       public
        constructor Create(const Size:TPasMPInt32);
        destructor Destroy; override;
+       procedure Clear;
        function Read(const Buffer:pointer;Bytes:TPasMPInt32):TPasMPInt32;
        function TryRead(const Buffer:pointer;Bytes:TPasMPInt32):TPasMPInt32;
        function ReadAsMuchAsPossible(const Buffer:pointer;Bytes:TPasMPInt32):TPasMPInt32;
@@ -2248,6 +2259,7 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
        fJobWorkerThreadHashTable:TPasMPJobWorkerThreadHashTable;
 {$endif}
        fProfiler:TPasMPProfiler;
+       fWorkerThreadPriority:TThreadPriority;
        class function GetThreadIDHash(ThreadID:{$ifdef fpc}TThreadID{$else}TPasMPUInt32{$endif}):TPasMPUInt32; {$ifdef HAS_STATIC}static;{$endif}{$ifdef CAN_INLINE}inline;{$endif}
        function GetJobWorkerThread:TPasMPJobWorkerThread; {$ifndef UseThreadLocalStorage}{$ifdef fpc}{$ifdef CAN_INLINE}inline;{$endif}{$endif}{$endif}
        procedure WaitForWakeUp;
@@ -2276,7 +2288,7 @@ type TPasMPAvailableCPUCores=array of TPasMPInt32;
        procedure ParallelIndirectMergeSortJobFunction(const Job:PPasMPJob;const ThreadIndex:TPasMPInt32);
        procedure ParallelIndirectMergeSortRootJobFunction(const Job:PPasMPJob;const ThreadIndex:TPasMPInt32);
       public
-       constructor Create(const MaxThreads:TPasMPInt32=-1;const ThreadHeadRoomForForeignTasks:TPasMPInt32=0;const DoCPUCorePinning:boolean=true;const SleepingOnIdle:boolean=true;const AllWorkerThreadsHaveOwnSystemThreads:boolean=false;const Profiling:boolean=false);
+       constructor Create(const MaxThreads:TPasMPInt32=-1;const ThreadHeadRoomForForeignTasks:TPasMPInt32=0;const DoCPUCorePinning:boolean=true;const SleepingOnIdle:boolean=true;const AllWorkerThreadsHaveOwnSystemThreads:boolean=false;const Profiling:boolean=false;const WorkerThreadPriority:TThreadPriority=TThreadPriority.tpNormal);
        destructor Destroy; override;
        class function CreateGlobalInstance:TPasMP;
        class procedure DestroyGlobalInstance;
@@ -2339,6 +2351,7 @@ var GlobalPasMP:TPasMP=nil; // "Optional" singleton-like global PasMP instance
     GlobalPasMPSleepingOnIdle:boolean=true;
     GlobalPasMPAllWorkerThreadsHaveOwnSystemThreads:boolean=false;
     GlobalPasMPProfiling:boolean=false;
+    GlobalPasMPWorkerThreadPriority:TThreadPriority=TThreadPriority.tpNormal;
 
     GPasMP:TPasMP absolute GlobalPasMP; // A shorter name for lazy peoples
 
@@ -2642,6 +2655,16 @@ function pthread_barrier_wait(__barrier:Ppthread_barrier_t):TPasMPInt32; cdecl; 
 {$endif}
 
 {$ifend}
+
+{$ifdef fpc}
+{$if defined(Linux) and not (defined(Android) or declared(pthread_condattr_setclock))}
+function pthread_condattr_setclock(Attr:ppthread_condattr_t;clockid:TPasMPInt32):TPasMPInt32; cdecl; external 'c' name 'pthread_condattr_setclock';
+{$ifend}
+{$else}
+{$if defined(Linux) and not defined(Android)}
+function pthread_condattr_setclock(var Attr:pthread_condattr_t;clockid:TPasMPInt32):TPasMPInt32; cdecl; external 'c' name 'pthread_condattr_setclock';
+{$ifend}
+{$endif}
 
 {$if defined(cpu386)}
 {$ifndef fpc}
@@ -4185,8 +4208,15 @@ begin
 end;
 
 class function TPasMP.GetThreadIDHash(ThreadID:{$ifdef fpc}TThreadID{$else}TPasMPUInt32{$endif}):TPasMPUInt32;
+{$if defined(Darwin)}
+var ThreadIDCasted:TPasMPUInt32 absolute ThreadID;
+{$ifend}
 begin
+{$if defined(Darwin)}
+ result:=(ThreadIDCasted*83492791) xor ((ThreadIDCasted shr 24)*19349669) xor ((ThreadIDCasted shr 16)*73856093) xor ((ThreadIDCasted shr 8)*50331653);
+{$else}
  result:=(ThreadID*83492791) xor ((ThreadID shr 24)*19349669) xor ((ThreadID shr 16)*73856093) xor ((ThreadID shr 8)*50331653);
+{$ifend}
 end;
 
 class function TPasMP.EncodeJobPriorityToJobFlags(const JobPriority:TPasMPJobPriority):TPasMPUInt32;
@@ -6069,16 +6099,54 @@ begin
 end;
 
 constructor TPasMPConditionVariable.Create;
+{$if defined(Unix)}
+const CLOCK_REALTIME=0;
+      CLOCK_MONOTONIC=1;
+      CLOCK_MONOTONIC_RAW=4;
+var r:TPasMPInt32;
+    TimeSpec_:TPasMPTimeSpec;
+{$ifend}
 begin
  inherited Create;
 {$if defined(Windows)}
  InitializeConditionVariable(@fConditionVariable);
 {$elseif defined(Unix)}
-{$ifdef fpc}
- pthread_cond_init(@fConditionVariable,nil);
-{$else}
- pthread_cond_init(fConditionVariable,nil);
-{$endif}
+ fClockID:=CLOCK_REALTIME;
+ fHasConditionVariableAttributes:=false;
+ // TODO: FIX-ME: Also use monotonic clock source for other *nix targets than just Linux, otherwise we
+ // can have NTP-related deadlock fun on these Non-Linux *nix targets!
+{$if defined(Linux) and not defined(Android)}
+ r:=pthread_condattr_init({$ifdef fpc}@fConditionVariableAttributes{$else}fConditionVariableAttributes{$endif});
+ if r=0 then begin
+  try
+   if clock_gettime(CLOCK_MONOTONIC_RAW,@TimeSpec_)=0 then begin
+    r:=pthread_condattr_setclock({$ifdef fpc}@fConditionVariableAttributes{$else}fConditionVariableAttributes{$endif},CLOCK_MONOTONIC_RAW);
+   end else begin
+    r:=-1; // No support for CLOCK_MONOTONIC_RAW
+   end;
+   if r=0 then begin
+    fClockID:=CLOCK_MONOTONIC_RAW;
+   end else begin
+    if clock_gettime(CLOCK_MONOTONIC,@TimeSpec_)=0 then begin
+     r:=pthread_condattr_setclock({$ifdef fpc}@fConditionVariableAttributes{$else}fConditionVariableAttributes{$endif},CLOCK_MONOTONIC);
+     if r=0 then begin
+      fClockID:=CLOCK_MONOTONIC;
+     end;
+    end;
+   end;
+  finally
+   if fClockID<>CLOCK_REALTIME then begin
+    fHasConditionVariableAttributes:=true;
+   end else begin
+    pthread_condattr_destroy({$ifdef fpc}@fConditionVariableAttributes{$else}fConditionVariableAttributes{$endif});
+   end;
+  end;
+ end;
+ if fHasConditionVariableAttributes then begin
+  pthread_cond_init({$ifdef fpc}@fConditionVariable{$else}fConditionVariable{$endif},@fConditionVariableAttributes);
+ end else{$ifend}begin
+  pthread_cond_init({$ifdef fpc}@fConditionVariable{$else}fConditionVariable{$endif},nil);
+ end;
 {$else}
  fWaitCounter:=0;
  fCriticalSection:=TPasMPCriticalSection.Create;
@@ -6097,6 +6165,13 @@ begin
 {$else}
  pthread_cond_destroy(fConditionVariable);
 {$endif}
+ if fHasConditionVariableAttributes then begin
+  try
+   pthread_condattr_destroy({$ifdef fpc}@fConditionVariableAttributes{$else}fConditionVariableAttributes{$endif});
+  finally
+   fHasConditionVariableAttributes:=false;
+  end;
+ end;
 {$else}
  fCriticalSection.Free;
  fEvent.Free;
@@ -6122,6 +6197,8 @@ begin
 end;
 {$elseif defined(Unix)}
 var TimeSpec_:TPasMPTimeSpec;
+    tv:timeval;
+    tz:TPasMPTimeZone;
 begin
  if dwMilliSeconds=INFINITE then begin
   case pthread_cond_wait({$ifdef fpc}@fConditionVariable,@Lock.fMutex{$else}fConditionVariable,Lock.fMutex{$endif}) of
@@ -6139,8 +6216,23 @@ begin
    end;
   end;
  end else begin
-  TimeSpec_.tv_sec:=dwMilliSeconds div 1000;
-  TimeSpec_.tv_nsec:=(dwMilliSeconds mod 1000)*1000000000;
+ {$if defined(Linux)}if clock_gettime(fClockID,@TimeSpec_)<>0 then{$ifend}begin
+   tz.tz_minuteswest:=0;
+   tz.tz_dsttime:=0;
+{$ifdef fpc}
+   fpgettimeofday(@tv,@tz);
+{$else}
+   gettimeofday(tv,@tz);
+{$endif}
+   TimeSpec_.tv_sec:=tv.tv_sec;
+   TimeSpec_.tv_nsec:=tv.tv_usec*1000;
+  end;
+  TimeSpec_.tv_sec:=TimeSpec_.tv_sec+(TPasMPInt64(dwMilliSeconds) div 1000);
+  TimeSpec_.tv_nsec:=((TPasMPInt64(dwMilliSeconds) mod 1000)*1000000)+(TimeSpec_.tv_nsec);
+  if TimeSpec_.tv_nsec>=1000000000 then begin
+   inc(TimeSpec_.tv_sec);
+   dec(TimeSpec_.tv_nsec,1000000000);
+  end;
   case pthread_cond_timedwait({$ifdef fpc}@fConditionVariable,@Lock.fMutex,@TimeSpec_{$else}fConditionVariable,Lock.fMutex,TimeSpec_{$endif}) of
    0:begin
     result:=wrSignaled;
@@ -7240,7 +7332,7 @@ asm
  test dword ptr [edi+TPasMPSpinLock.fState],1
  jnz @SpinLoop
 @TryAgain:
- lock bts dword ptr [rdi+PasMPSpinLock.fState],0
+ lock bts dword ptr [rdi+TPasMPSpinLock.fState],0
  jnc @TryDone
 @SpinLoop:
  pause
@@ -7847,6 +7939,8 @@ begin
  end;
  Node^.Previous.PointerValue:=nil;
  Node^.Previous.TagValue:=0;
+ Node^.Next.PointerValue:=nil;
+ Node^.Next.TagValue:=0;
  InitializeItem(@Node^.Data);
  CopyItem(@Item,@Node^.Data);
  repeat
@@ -7863,7 +7957,7 @@ begin
    end else begin
     Temporary.PointerValue:=Node;
     Temporary.TagValue:=Next.TagValue+1;
-    OldNext.Value:=TPasMPInterlocked.CompareExchange(PPasMPThreadSafeQueueNode(fTail^.PointerValue)^.Next.Value,Temporary.Value,Next.Value);
+    OldNext.Value:=TPasMPInterlocked.CompareExchange(PPasMPThreadSafeQueueNode(Tail^.PointerValue)^.Next.Value,Temporary.Value,Next.Value);
     if {$ifdef CPU64}(OldNext.PointerValue=Next.PointerValue) and (OldNext.TagValue=Next.TagValue){$else}OldNext.Value.Value=Next.Value.Value{$endif} then begin
      Temporary.PointerValue:=Node;
      Temporary.TagValue:=Tail.TagValue+1;
@@ -9130,12 +9224,21 @@ begin
  fWriteIndex:=0;
  fData:=nil;
  SetLength(fData,fSize);
+ fLockState:=0;
 end;
 
 destructor TPasMPSingleProducerSingleConsumerRingBuffer.Destroy;
 begin
  SetLength(fData,0);
  inherited Destroy;
+end;
+
+procedure TPasMPSingleProducerSingleConsumerRingBuffer.Clear;
+begin
+ TPasMPMultipleReaderSingleWriterSpinLock.AcquireWrite(fLockState);
+ fReadIndex:=0;
+ fWriteIndex:=0;
+ TPasMPMultipleReaderSingleWriterSpinLock.ReleaseWrite(fLockState);
 end;
 
 function TPasMPSingleProducerSingleConsumerRingBuffer.Read(const Buffer:pointer;Bytes:TPasMPInt32):TPasMPInt32;
@@ -9145,6 +9248,7 @@ begin
  if (Bytes=0) or (Bytes>fSize) then begin
   result:=0;
  end else begin
+  TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
   repeat
 {$if not (defined(CPU386) or defined(CPUx86_64))}
    TPasMPMemoryBarrier.ReadWrite;
@@ -9190,6 +9294,7 @@ begin
   TPasMPMemoryBarrier.ReadWrite;
 {$endif}
   fReadIndex:=LocalReadIndex;
+  TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
   result:=Bytes;
  end;
 end;
@@ -9201,6 +9306,7 @@ begin
  if (Bytes=0) or (Bytes>fSize) then begin
   result:=0;
  end else begin
+  TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
 {$if not (defined(CPU386) or defined(CPUx86_64))}
   TPasMPMemoryBarrier.ReadWrite;
 {$ifend}
@@ -9244,6 +9350,7 @@ begin
    fReadIndex:=LocalReadIndex;
    result:=Bytes;
   end;
+  TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
  end;
 end;
 
@@ -9254,6 +9361,7 @@ begin
  if (Bytes=0) or (Bytes>fSize) then begin
   result:=0;
  end else begin
+  TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
 {$if not (defined(CPU386) or defined(CPUx86_64))}
   TPasMPMemoryBarrier.ReadWrite;
 {$ifend}
@@ -9297,6 +9405,7 @@ begin
 {$endif}
    fReadIndex:=LocalReadIndex;
   end;
+  TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
   result:=Bytes;
  end;
 end;
@@ -9308,6 +9417,7 @@ begin
  if (Bytes=0) or (Bytes>fSize) then begin
   result:=0;
  end else begin
+  TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
   repeat
 {$if not (defined(CPU386) or defined(CPUx86_64))}
    TPasMPMemoryBarrier.ReadWrite;
@@ -9353,6 +9463,7 @@ begin
   TPasMPMemoryBarrier.ReadWrite;
 {$endif}
   fWriteIndex:=LocalWriteIndex;
+  TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
   result:=Bytes;
  end;
 end;
@@ -9364,6 +9475,7 @@ begin
  if (Bytes=0) or (Bytes>fSize) then begin
   result:=0;
  end else begin
+  TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
 {$if not (defined(CPU386) or defined(CPUx86_64))}
   TPasMPMemoryBarrier.ReadWrite;
 {$ifend}
@@ -9407,6 +9519,7 @@ begin
    fWriteIndex:=LocalWriteIndex;
    result:=Bytes;
   end;
+  TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
  end;
 end;
 
@@ -9417,6 +9530,7 @@ begin
  if (Bytes=0) or (Bytes>fSize) then begin
   result:=0;
  end else begin
+  TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
 {$if not (defined(CPU386) or defined(CPUx86_64))}
   TPasMPMemoryBarrier.ReadWrite;
 {$ifend}
@@ -9460,6 +9574,7 @@ begin
 {$endif}
    fWriteIndex:=LocalWriteIndex;
   end;
+  TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
   result:=Bytes;
  end;
 end;
@@ -9467,6 +9582,7 @@ end;
 function TPasMPSingleProducerSingleConsumerRingBuffer.AvailableForRead:TPasMPInt32;
 var LocalReadIndex,LocalWriteIndex:TPasMPInt32;
 begin
+ TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
 {$if not (defined(CPU386) or defined(CPUx86_64))}
  TPasMPMemoryBarrier.ReadWrite;
 {$ifend}
@@ -9477,6 +9593,7 @@ begin
  TPasMPMemoryBarrier.Read;
 {$ifend}
  LocalWriteIndex:=fWriteIndex;
+ TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
  if LocalWriteIndex>=LocalReadIndex then begin
   result:=LocalWriteIndex-LocalReadIndex;
  end else begin
@@ -9487,6 +9604,7 @@ end;
 function TPasMPSingleProducerSingleConsumerRingBuffer.AvailableForWrite:TPasMPInt32;
 var LocalReadIndex,LocalWriteIndex:TPasMPInt32;
 begin
+ TPasMPMultipleReaderSingleWriterSpinLock.AcquireRead(fLockState);
 {$if not (defined(CPU386) or defined(CPUx86_64))}
  TPasMPMemoryBarrier.ReadWrite;
 {$ifend}
@@ -9497,6 +9615,7 @@ begin
  TPasMPMemoryBarrier.Read;
 {$ifend}
  LocalWriteIndex:=fWriteIndex;
+ TPasMPMultipleReaderSingleWriterSpinLock.ReleaseRead(fLockState);
  if LocalWriteIndex>=LocalReadIndex then begin
   result:=((fSize+LocalReadIndex)-LocalWriteIndex)-1;
  end else begin
@@ -10955,6 +11074,7 @@ constructor TPasMPWorkerSystemThread.Create(const AJobWorkerThread:TPasMPJobWork
 begin
  fJobWorkerThread:=AJobWorkerThread;
  inherited Create(false);
+ Priority:=AJobWorkerThread.fPasMPInstance.fWorkerThreadPriority;
 end;
 
 destructor TPasMPWorkerSystemThread.Destroy;
@@ -10968,6 +11088,7 @@ begin
  NameThreadForDebugging('TPasMPWorkerSystemThread');
 {$endif}
  ReturnValue:=0;
+ Priority:=fJobWorkerThread.fPasMPInstance.fWorkerThreadPriority;
  fJobWorkerThread.ThreadProc;
  ReturnValue:=1;
 end;
@@ -11884,7 +12005,7 @@ begin
  result:=@fHistory[TPasMPUInt32(TPasMPInterlocked.Increment(TPasMPInt32(fCount))-1) and PasMPProfilerHistoryRingBufferSizeMask];
 end;
 
-constructor TPasMP.Create(const MaxThreads:TPasMPInt32=-1;const ThreadHeadRoomForForeignTasks:TPasMPInt32=0;const DoCPUCorePinning:boolean=true;const SleepingOnIdle:boolean=true;const AllWorkerThreadsHaveOwnSystemThreads:boolean=false;const Profiling:boolean=false);
+constructor TPasMP.Create(const MaxThreads:TPasMPInt32=-1;const ThreadHeadRoomForForeignTasks:TPasMPInt32=0;const DoCPUCorePinning:boolean=true;const SleepingOnIdle:boolean=true;const AllWorkerThreadsHaveOwnSystemThreads:boolean=false;const Profiling:boolean=false;const WorkerThreadPriority:TThreadPriority=TThreadPriority.tpNormal);
 var Index:TPasMPInt32;
 begin
 
@@ -11903,6 +12024,8 @@ begin
  fSleepingOnIdle:=SleepingOnIdle;
 
  fAllWorkerThreadsHaveOwnSystemThreads:=AllWorkerThreadsHaveOwnSystemThreads;
+
+ fWorkerThreadPriority:=WorkerThreadPriority;
 
  if Profiling then begin
   fProfiler:=TPasMPProfiler.Create(self);
@@ -12037,7 +12160,8 @@ begin
                                GlobalPasMPDoCPUCorePinning,
                                GlobalPasMPSleepingOnIdle,
                                GlobalPasMPAllWorkerThreadsHaveOwnSystemThreads,
-                               GlobalPasMPProfiling);
+                               GlobalPasMPProfiling,
+                               GlobalPasMPWorkerThreadPriority);
     TPasMPMemoryBarrier.Sync;
    end;
   finally
@@ -12272,10 +12396,10 @@ begin
  mib[0]:=CTL_HW;
  mib[1]:=HW_AVAILCPU;
  len:=SizeOf(t);
- fpsysctl(PAnsiChar(@mib),2,@t,@len,nil,0);
+ fpsysctl(Pointer(@mib),2,@t,@len,nil,0);
  if t<1 then begin
   mib[1]:=HW_NCPU;
-  fpsysctl(PAnsiChar(@mib),2,@t,@len,nil,0);
+  fpsysctl(Pointer(@mib),2,@t,@len,nil,0);
   if t<1 then begin
    t:=1;
   end;
